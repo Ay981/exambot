@@ -1,0 +1,14 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+*.db
+.env
+.git
+.gitignore
+.data/
+data/*.pdf
+data/*_pages.json
