@@ -849,19 +849,29 @@ def main():
 
     print("✅ Bot is running! Go to Telegram.")
 
-    if USE_WEBHOOK:
+    # Only enable webhook if a base URL is provided; else fallback to polling
+    if USE_WEBHOOK and WEBHOOK_URL_BASE.strip():
         # Build full webhook URL
         base = WEBHOOK_URL_BASE.rstrip("/")
         path = WEBHOOK_PATH if WEBHOOK_PATH.startswith("/") else "/" + WEBHOOK_PATH
         webhook_url = f"{base}{path}"
         print(f"Using webhook at {webhook_url} (listen {HOST}:{PORT}{path})")
-        application.run_webhook(
-            listen=HOST,
-            port=PORT,
-            url_path=path.lstrip('/'),
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-        )
+        try:
+            application.run_webhook(
+                listen=HOST,
+                port=PORT,
+                url_path=path.lstrip('/'),
+                webhook_url=webhook_url,
+                drop_pending_updates=True,
+            )
+        except RuntimeError as e:
+            # Graceful fallback when PTB webhooks extra is not installed
+            msg = str(e)
+            if 'python-telegram-bot[webhooks]' in msg or 'start_webhook' in msg:
+                print("PTB webhook extra not installed; falling back to polling.")
+                application.run_polling()
+            else:
+                raise
     else:
         application.run_polling()
 
