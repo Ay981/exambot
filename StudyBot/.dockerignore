@@ -9,6 +9,7 @@ __pycache__/
 .env
 .git
 .gitignore
+.github/
 .data/
 data/*.pdf
 data/*_pages.json

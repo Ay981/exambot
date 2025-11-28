@@ -12,7 +12,6 @@ from google import genai
 from google.api_core.exceptions import NotFound as GoogleNotFound
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
@@ -21,7 +20,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-from telegram.helpers import escape_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 # ----------------------
@@ -368,23 +366,13 @@ def split_text(text: str, limit: int = 3800) -> List[str]:
 
 
 async def reply_markdown(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    # Escape only user-provided dynamic parts when needed outside this helper
-    try:
-        if update.message:
-            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        elif update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        else:
-            # As a fallback, send via bot
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text, parse_mode=ParseMode.MARKDOWN)
-    except Exception:
-        # Fallback to plain text if markdown fails
-        if update.message:
-            await update.message.reply_text(text)
-        elif update.callback_query and update.callback_query.message:
-            await update.callback_query.message.reply_text(text)
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
+    # Plain text only: no Markdown/LaTeX parse mode
+    if update.message:
+        await update.message.reply_text(text)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text)
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
 
 async def reply_long(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
@@ -591,29 +579,14 @@ async def generate_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Token safety: trim to ~15000 chars
     selection = selection[:15000]
 
-    topic_safe = escape_markdown(topic, version=1)
-    await reply_markdown(update, context, f"🧠 Generating a Hard Exam on: *{topic_safe}*\n_Source: {source_desc}_\nThis takes ~10–20 seconds…")
-    output_fmt = get_output_format(chat_id)
-    if output_fmt == "latex":
-        prompt = f"""
-You are a strict university professor. Generate a Midterm Exam in LaTeX ONLY, using valid LaTeX markup, based ONLY on the text below.
-Focus Area: {topic}
-
-LaTeX Requirements:
-- Provide a self-contained LaTeX document using article class.
-- Use sections for Multiple Choice, Short Answers, and a closing Motivational Quote.
-- Do NOT include answers.
-
-Context from PDF (pages {start_page}-{end_page}):
-{selection}
-"""
-    else:
-        prompt = f"""
+    await reply_markdown(update, context, f"🧠 Generating a Hard Exam on: {topic}\nSource: {source_desc}\nThis takes ~10–20 seconds…")
+    # Plain text output only: no Markdown/LaTeX
+    prompt = f"""
 You are a strict university professor.
-Generate a Midterm Exam based ONLY on the text provided below.
+Generate a Midterm Exam in plain text ONLY (no Markdown, no LaTeX, no code fences), based ONLY on the text provided below.
 Focus Area: {topic}
 
-Format:
+Format (plain text):
 1. 5 Multiple Choice Questions (tricky/application-based)
 2. 2 Short Answer Questions
 3. 1 Motivational Quote at the end (Islamic or General)
@@ -630,19 +603,10 @@ Context from PDF (pages {start_page}-{end_page}):
         text = (getattr(resp, "text", None) or "(No response) ").strip()
         if not text:
             text = "(The AI returned an empty response.)"
-        if output_fmt == "latex":
-            # Send as a .tex file so users can compile
-            buf = io.BytesIO(text.encode("utf-8"))
-            buf.name = "exam.tex"
-            if target_msg:
-                await target_msg.reply_document(document=buf, filename="exam.tex", caption="LaTeX exam file")
-            else:
-                await context.bot.send_document(chat_id=update.effective_chat.id, document=buf, filename="exam.tex", caption="LaTeX exam file")
-        else:
-            await reply_long(update, context, text)
+        await reply_long(update, context, text)
         # Stash last quiz so we can reveal answers later
         context.chat_data["last_quiz"] = {
-            "format": output_fmt,
+            "format": "plain",
             "topic": topic,
             "start_page": start_page,
             "end_page": end_page,
@@ -667,18 +631,10 @@ Context from PDF (pages {start_page}-{end_page}):
             try:
                 resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
                 text = (getattr(resp, "text", None) or "(No response) ").strip()
-                if output_fmt == "latex":
-                    buf = io.BytesIO(text.encode("utf-8"))
-                    buf.name = "exam.tex"
-                    if target_msg:
-                        await target_msg.reply_document(document=buf, filename="exam.tex", caption="LaTeX exam file")
-                    else:
-                        await context.bot.send_document(chat_id=update.effective_chat.id, document=buf, filename="exam.tex", caption="LaTeX exam file")
-                else:
-                    await reply_long(update, context, text)
+                await reply_long(update, context, text)
                 # Stash last quiz post-fallback
                 context.chat_data["last_quiz"] = {
-                    "format": output_fmt,
+                    "format": "plain",
                     "topic": topic,
                     "start_page": start_page,
                     "end_page": end_page,
@@ -726,14 +682,10 @@ Context from PDF (pages {start_page}-{end_page}):
 # ----------------------
 
 def build_main_keyboard(chat_id: str) -> InlineKeyboardMarkup:
-    fmt = get_output_format(chat_id)
-    fmt_label = "LaTeX" if fmt == "latex" else "Markdown"
-    toggle_label = "Format: LaTeX" if fmt != "latex" else "Format: Markdown"
     rows = [
         [InlineKeyboardButton("🧪 Generate Quiz", callback_data="QUIZ")],
         [InlineKeyboardButton("📚 List Chapters", callback_data="LIST_CHAPTERS")],
         [InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")],
-        [InlineKeyboardButton(toggle_label, callback_data="FORMAT_LATEX" if fmt != "latex" else "FORMAT_MD")],
     ]
     return InlineKeyboardMarkup(rows)
 
@@ -784,29 +736,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await generate_quiz(update, context)
         return
 
-    if data == "FORMAT_LATEX":
-        set_output_format(chat_id, "latex")
-        await query.edit_message_text("Output format set to LaTeX.")
-        return
-    if data == "FORMAT_MD":
-        set_output_format(chat_id, "markdown")
-        await query.edit_message_text("Output format set to Markdown.")
-        return
-
     if data == "ANSWERS":
         # Defer to a shared handler so /answers reuses logic
         await answers_cmd(update, context)
         return
 
 
-async def format_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    if context.args:
-        arg = context.args[0].lower()
-        if arg in {"latex", "md", "markdown"}:
-            set_output_format(chat_id, "latex" if arg == "latex" else "markdown")
-    fmt = get_output_format(chat_id)
-    await update.message.reply_text(f"Output format: {fmt.title()}.")
+# Removed format command: we always use plain text now.
 
 
 async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -842,36 +778,16 @@ async def answers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(chat_id=update.effective_chat.id, text="No quiz found. Generate one first with /quiz.")
         return
 
-    fmt = last.get("format", "markdown")
+    fmt = last.get("format", "plain")
     topic = last.get("topic", "General Content")
     start_page = last.get("start_page", 1)
     end_page = last.get("end_page", 1)
     questions_text = last.get("questions", "")
     selection = last.get("selection", "")
 
-    if fmt == "latex":
-        prompt = f"""
-You previously created an exam in LaTeX (no answers) from the PDF excerpt below.
-Now generate a LaTeX Answer Key as a stand-alone article document.
-
-Requirements:
-- Title the document "Answer Key".
-- Match the numbering and ordering of the questions exactly.
-- For Multiple Choice, provide the correct option letter and a one-line justification.
-- For Short Answers, provide a concise model answer (2-4 sentences).
-- Do NOT repeat full questions verbatim; keep answers concise.
-
-Focus Area: {topic}
-Questions (LaTeX source):
-{questions_text}
-
-Context excerpt from PDF (pages {start_page}-{end_page}):
-{selection}
-"""
-    else:
-        prompt = f"""
+    prompt = f"""
 You previously created an exam (questions only, no answers) from the PDF excerpt below.
-Now produce a clean Answer Key in Markdown matching the same numbering and options.
+Now produce a clean Answer Key in plain text ONLY (no Markdown, no LaTeX, no code fences), matching the same numbering and options.
 
 Requirements:
 - For Multiple Choice, show the correct letter and a brief justification.
@@ -893,30 +809,14 @@ Context excerpt from PDF (pages {start_page}-{end_page}):
         text = (getattr(resp, "text", None) or "(No response)").strip()
         if not text:
             text = "(The AI returned an empty response.)"
-        if fmt == "latex":
-            buf = io.BytesIO(text.encode("utf-8"))
-            buf.name = "answers.tex"
-            if target_msg:
-                await target_msg.reply_document(document=buf, filename="answers.tex", caption="LaTeX answer key")
-            else:
-                await context.bot.send_document(chat_id=update.effective_chat.id, document=buf, filename="answers.tex", caption="LaTeX answer key")
-        else:
-            await reply_long(update, context, text)
+        await reply_long(update, context, text)
     except GoogleNotFound:
         logger.warning(f"Model not found or unsupported: {current_model_name}. Trying fallback…")
         if choose_model(None):
             try:
                 resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
                 text = (getattr(resp, "text", None) or "(No response)").strip()
-                if fmt == "latex":
-                    buf = io.BytesIO(text.encode("utf-8"))
-                    buf.name = "answers.tex"
-                    if target_msg:
-                        await target_msg.reply_document(document=buf, filename="answers.tex", caption="LaTeX answer key")
-                    else:
-                        await context.bot.send_document(chat_id=update.effective_chat.id, document=buf, filename="answers.tex", caption="LaTeX answer key")
-                else:
-                    await reply_long(update, context, text)
+                await reply_long(update, context, text)
                 return
             except Exception:
                 pass
@@ -957,7 +857,7 @@ def main():
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('help', help_cmd))
     application.add_handler(CommandHandler('status', status))
-    application.add_handler(CommandHandler('format', format_cmd))
+    # format command removed (plain text only)
     application.add_handler(CommandHandler('models', models_cmd))
     application.add_handler(CommandHandler('answers', answers_cmd))
     application.add_handler(CommandHandler('quiz', generate_quiz))

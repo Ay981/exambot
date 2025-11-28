@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual envs
+venv/
+.venv/
+
+# Editors/IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage, build, caches
+.coverage*
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# Logs
+*.log
+
+# Secrets
+.env
+
+# Local data and artifacts
+# Ignore all runtime data; code will create the folder if missing
+/data/
+
+# Binary docs and databases
+*.pdf
+*.db
+*.sqlite3
+
+# LaTeX artifacts (optional)
+*.aux
+*.out
+*.log
+*.toc
+*.synctex.gz
