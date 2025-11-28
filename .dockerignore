@@ -1,0 +1,35 @@
+# Root dockerignore for reducing build context size
+
+.git
+.gitignore
+Dockerfile
+.vscode
+.idea
+
+# Python caches
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual envs
+StudyBot/venv/
+venv/
+.venv/
+
+# Local data / runtime artifacts
+StudyBot/data/*.pdf
+StudyBot/data/*_pages.json
+StudyBot/data/*.db
+StudyBot/data/*.sqlite3
+
+# Secrets
+.env
+StudyBot/.env
+
+# Logs
+*.log
+
+# Other ignores
+*.sqlite3
+*.db
