@@ -9,7 +9,6 @@ from typing import List, Tuple, Optional
 
 import pdfplumber
 from google import genai
-from google.api_core.exceptions import NotFound as GoogleNotFound
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -517,50 +516,55 @@ def parse_quiz_args(args: List[str]) -> Tuple[Optional[Tuple[int, int]], Optiona
 
 
 async def generate_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate an exam from the uploaded PDF.
+
+    Supports optional scoping by page range (pages a-b) or chapter (chapter N / chapter I).
+    Remaining tokens after those directives form the topic/focus area.
+    """
     target_msg = update.message or (update.callback_query.message if getattr(update, 'callback_query', None) else None)
     if genai_client is None:
+        msg = "AI not configured. Set GEMINI_API_KEY in .env and restart."
         if target_msg:
-            await target_msg.reply_text("AI not configured. Please set GEMINI_API_KEY in .env and restart.")
+            await target_msg.reply_text(msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="AI not configured. Please set GEMINI_API_KEY in .env and restart.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
         return
 
     chat_id = str(update.effective_chat.id)
     meta = read_doc_meta(chat_id)
     if not meta:
+        msg = "⚠️ You haven't uploaded a PDF yet!"
         if target_msg:
-            await target_msg.reply_text("⚠️ You haven't uploaded a PDF yet!")
+            await target_msg.reply_text(msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ You haven't uploaded a PDF yet!")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
         return
 
     pages_text = load_pages_json(chat_id)
     if not pages_text:
+        msg = "⚠️ I couldn't load your PDF text. Please upload it again."
         if target_msg:
-            await target_msg.reply_text("⚠️ I couldn't load your PDF text. Please upload it again.")
+            await target_msg.reply_text(msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ I couldn't load your PDF text. Please upload it again.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
         return
 
-    page_count = int(meta["page_count"]) if meta else len(pages_text)
-
+    page_count = int(meta.get("page_count", len(pages_text)))
     pages_range, chapter_term, topic = parse_quiz_args(context.args)
 
     start_page, end_page = 1, min(page_count, len(pages_text))
     source_desc = "Full document"
-
     if chapter_term:
         rng = read_chapter_range(chat_id, chapter_term)
         if rng:
             start_page, end_page = rng
             source_desc = f"Chapter {chapter_term} (pp. {start_page}-{end_page})"
         else:
+            warn = f"Couldn't find Chapter {chapter_term}. Falling back to full document."
             if target_msg:
-                await target_msg.reply_text(
-                    f"Couldn't find Chapter {chapter_term}. Falling back to full document."
-                )
+                await target_msg.reply_text(warn)
             else:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Couldn't find Chapter {chapter_term}. Falling back to full document.")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=warn)
 
     if pages_range:
         a, b = pages_range
@@ -568,22 +572,17 @@ async def generate_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
             start_page, end_page = a, b
             source_desc = f"Pages {a}-{b}"
         else:
+            warn = f"Invalid page range {a}-{b}. Using 1-{page_count}."
             if target_msg:
-                await target_msg.reply_text(
-                    f"Invalid page range {a}-{b}. Using 1-{page_count}."
-                )
+                await target_msg.reply_text(warn)
             else:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Invalid page range {a}-{b}. Using 1-{page_count}.")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=warn)
 
-    selection = "\n\n".join(pages_text[start_page - 1:end_page])
-    # Token safety: trim to ~15000 chars
-    selection = selection[:15000]
-
+    selection = "\n\n".join(pages_text[start_page - 1:end_page])[:15000]
     await reply_markdown(update, context, f"🧠 Generating a Hard Exam on: {topic}\nSource: {source_desc}\nThis takes ~10–20 seconds…")
-    # Plain text output only: no Markdown/LaTeX
-    prompt = f"""
-You are a strict university professor.
-Generate a Midterm Exam in plain text ONLY (no Markdown, no LaTeX, no code fences), based ONLY on the text provided below.
+
+    prompt = f"""You are a strict university professor.
+Generate a Midterm Exam in plain text ONLY (no Markdown/LaTeX/code fences) using ONLY the provided PDF excerpt.
 Focus Area: {topic}
 
 Format (plain text):
@@ -595,16 +594,13 @@ Format (plain text):
 Context from PDF (pages {start_page}-{end_page}):
 {selection}
 """
+
     try:
-        # Ensure we have a working model name; if not, try to choose one
         if not current_model_name and not choose_model(GEMINI_MODEL):
             raise RuntimeError("No available Gemini model. Set GEMINI_MODEL in .env to a valid model.")
         resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
-        text = (getattr(resp, "text", None) or "(No response) ").strip()
-        if not text:
-            text = "(The AI returned an empty response.)"
+        text = (getattr(resp, "text", None) or "(No response)").strip() or "(The AI returned an empty response.)"
         await reply_long(update, context, text)
-        # Stash last quiz so we can reveal answers later
         context.chat_data["last_quiz"] = {
             "format": "plain",
             "topic": topic,
@@ -612,99 +608,89 @@ Context from PDF (pages {start_page}-{end_page}):
             "end_page": end_page,
             "source_desc": source_desc,
             "questions": text,
-            # keep a shorter slice of selection to save tokens on answer generation
             "selection": selection[:10000],
         }
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
         if target_msg:
             await target_msg.reply_text("🗝 Tap the button below to reveal the answers.")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
             await target_msg.reply_text("Answer key:", reply_markup=kb)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="� Tap the button below to reveal the answers.")
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="🗝 Tap the button below to reveal the answers.")
             await context.bot.send_message(chat_id=update.effective_chat.id, text="Answer key:", reply_markup=kb)
-    except GoogleNotFound as e:
-        # Fallback to another model if current is unavailable
-        logger.warning(f"Model not found or unsupported: {current_model_name}. Trying fallback…")
-        # Try another model and retry once
-        if choose_model(None):
-            try:
-                resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
-                text = (getattr(resp, "text", None) or "(No response) ").strip()
-                await reply_long(update, context, text)
-                # Stash last quiz post-fallback
-                context.chat_data["last_quiz"] = {
-                    "format": "plain",
-                    "topic": topic,
-                    "start_page": start_page,
-                    "end_page": end_page,
-                    "source_desc": source_desc,
-                    "questions": text,
-                    "selection": selection[:10000],
-                }
-                if target_msg:
-                    await target_msg.reply_text("🗝 Tap the button below to reveal the answers.")
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
-                    await target_msg.reply_text("Answer key:", reply_markup=kb)
-                else:
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text="🗝 Tap the button below to reveal the answers.")
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
-                    await context.bot.send_message(chat_id=update.effective_chat.id, text="Answer key:", reply_markup=kb)
-                return
-            except Exception:
-                pass
-        # If still failing, inform user
-        msg = (
-            "⚠️ The AI model name seems unsupported for your API key. "
-            "Set GEMINI_MODEL in .env to a valid model (e.g., gemini-1.5-pro or gemini-pro)."
-        )
-        if target_msg:
-            await target_msg.reply_text(msg)
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
     except RuntimeError as e:
-        # Typically: No available Gemini model
         msg = str(e) or "No available Gemini model. Run /models and set GEMINI_MODEL in .env."
         if target_msg:
             await target_msg.reply_text(msg)
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
     except Exception as e:
-        logger.exception("AI Error")
-        if target_msg:
-            await target_msg.reply_text("⚠️ The AI is overloaded or the text was too long. Try again later.")
+        msg_text = str(e).lower()
+        if any(t in msg_text for t in ["not found", "404", "model", "unsupported"]):
+            logger.warning(f"Model issue: {e}. Attempting fallback…")
+            if choose_model(None):
+                try:
+                    resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
+                    text = (getattr(resp, "text", None) or "(No response)").strip() or "(The AI returned an empty response.)"
+                    await reply_long(update, context, text)
+                    context.chat_data["last_quiz"] = {
+                        "format": "plain",
+                        "topic": topic,
+                        "start_page": start_page,
+                        "end_page": end_page,
+                        "source_desc": source_desc,
+                        "questions": text,
+                        "selection": selection[:10000],
+                    }
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")]])
+                    if target_msg:
+                        await target_msg.reply_text("🗝 Tap the button below to reveal the answers.")
+                        await target_msg.reply_text("Answer key:", reply_markup=kb)
+                    else:
+                        await context.bot.send_message(chat_id=update.effective_chat.id, text="🗝 Tap the button below to reveal the answers.")
+                        await context.bot.send_message(chat_id=update.effective_chat.id, text="Answer key:", reply_markup=kb)
+                    return
+                except Exception as inner:
+                    logger.error(f"Fallback model failed: {inner}")
+            human_msg = "⚠️ Gemini model unsupported. Run /models and set GEMINI_MODEL to one of the listed names."
+            if target_msg:
+                await target_msg.reply_text(human_msg)
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=human_msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ The AI is overloaded or the text was too long. Try again later.")
+            logger.exception("AI Error")
+            msg = "⚠️ The AI is overloaded or the text was too long. Try again later."
+            if target_msg:
+                await target_msg.reply_text(msg)
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
-
-# ----------------------
-# Keyboards & Callbacks
-# ----------------------
 
 def build_main_keyboard(chat_id: str) -> InlineKeyboardMarkup:
-    rows = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🧪 Generate Quiz", callback_data="QUIZ")],
         [InlineKeyboardButton("📚 List Chapters", callback_data="LIST_CHAPTERS")],
         [InlineKeyboardButton("🗝 Reveal Answers", callback_data="ANSWERS")],
-    ]
-    return InlineKeyboardMarkup(rows)
+    ])
 
 
 async def send_main_keyboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    kb = build_main_keyboard(chat_id)
-    await update.message.reply_text("Quick actions:", reply_markup=kb)
+    kb = build_main_keyboard(str(update.effective_chat.id))
+    # Always reply with a fresh message (avoids editing issues on callbacks)
+    if update.message:
+        await update.message.reply_text("Quick actions:", reply_markup=kb)
+    elif update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text("Quick actions:", reply_markup=kb)
+    else:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Quick actions:", reply_markup=kb)
 
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    chat_id = str(update.effective_chat.id)
     data = query.data or ""
+    chat_id = str(update.effective_chat.id)
 
     if data == "QUIZ":
-        # Run default quiz on current selection (full doc)
-        # Reuse command handler by invoking with no args
         context.args = []
         await generate_quiz(update, context)
         return
@@ -730,75 +716,64 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("CHAPTER::"):
         chapter_term = data.split("::", 1)[1]
-        # Invoke quiz generation focused on this chapter
-        # Simulate args: ["chapter", term]
         context.args = ["chapter", chapter_term.replace("chapter", "", 1).strip()]
         await generate_quiz(update, context)
         return
 
     if data == "ANSWERS":
-        # Defer to a shared handler so /answers reuses logic
         await answers_cmd(update, context)
         return
 
-
-# Removed format command: we always use plain text now.
+    await query.edit_message_text("Unsupported action.")
 
 
 async def models_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List available models for your API key with generateContent capability."""
+    if genai_client is None:
+        await update.message.reply_text("No GEMINI_API_KEY configured or client init failed.")
+        return
     try:
-        if genai_client is None:
-            await update.message.reply_text("No GEMINI_API_KEY configured or client init failed.")
-            return
         items = genai_client.models.list()
-        names = []
-        for m in items:
-            full = getattr(m, "name", "<unknown>")
-            base = full.split("/")[-1]
-            names.append(base)
-        if not names:
-            await update.message.reply_text("No models listed. Your key may not have access in this region.")
-            return
-        # Compact output
-        preview = "\n".join(names[:30])
-        await update.message.reply_text(f"Models (first {min(30, len(names))} shown):\n{preview}\n\nSet GEMINI_MODEL in .env to one of these.")
     except Exception as e:
         await update.message.reply_text(f"Failed to list models: {e}")
+        return
+    names = []
+    for m in items:
+        full = getattr(m, "name", "<unknown>")
+        names.append(full.split("/")[-1])
+    if not names:
+        await update.message.reply_text("No models listed. Your key may not have access in this region.")
+        return
+    preview = "\n".join(names[:30])
+    await update.message.reply_text(f"Models (first {min(30, len(names))} shown):\n{preview}\n\nSet GEMINI_MODEL in .env to one of these.")
 
 
 async def answers_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reveal answer key for the last generated quiz."""
+    """Reveal answer key for the most recent quiz."""
     target_msg = update.message or (update.callback_query.message if getattr(update, 'callback_query', None) else None)
     last = context.chat_data.get("last_quiz")
     if not last:
+        msg = "No quiz found. Generate one first with /quiz."
         if target_msg:
-            await target_msg.reply_text("No quiz found. Generate one first with /quiz.")
+            await target_msg.reply_text(msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="No quiz found. Generate one first with /quiz.")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
         return
 
-    fmt = last.get("format", "plain")
     topic = last.get("topic", "General Content")
     start_page = last.get("start_page", 1)
     end_page = last.get("end_page", 1)
     questions_text = last.get("questions", "")
     selection = last.get("selection", "")
 
-    prompt = f"""
-You previously created an exam (questions only, no answers) from the PDF excerpt below.
-Now produce a clean Answer Key in plain text ONLY (no Markdown, no LaTeX, no code fences), matching the same numbering and options.
-
-Requirements:
-- For Multiple Choice, show the correct letter and a brief justification.
-- For Short Answers, give a concise model answer (2-4 sentences).
-- Do NOT repeat full questions; list answers in order.
-
+    prompt = f"""Produce a plain text Answer Key for the exam (questions only) below.
+Rules:
+1. Multiple Choice: give correct letter + short justification.
+2. Short Answer: concise model answer (2-4 sentences).
+3. Do NOT repeat full questions, list answers in order.
 Focus Area: {topic}
 Questions:
 {questions_text}
-
-Context excerpt from PDF (pages {start_page}-{end_page}):
+Excerpt (pages {start_page}-{end_page}):
 {selection}
 """
 
@@ -806,40 +781,38 @@ Context excerpt from PDF (pages {start_page}-{end_page}):
         if not current_model_name and not choose_model(GEMINI_MODEL):
             raise RuntimeError("No available Gemini model. Set GEMINI_MODEL in .env to a valid model.")
         resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
-        text = (getattr(resp, "text", None) or "(No response)").strip()
-        if not text:
-            text = "(The AI returned an empty response.)"
+        text = (getattr(resp, "text", None) or "(No response)").strip() or "(The AI returned an empty response.)"
         await reply_long(update, context, text)
-    except GoogleNotFound:
-        logger.warning(f"Model not found or unsupported: {current_model_name}. Trying fallback…")
-        if choose_model(None):
-            try:
-                resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
-                text = (getattr(resp, "text", None) or "(No response)").strip()
-                await reply_long(update, context, text)
-                return
-            except Exception:
-                pass
-        msg = (
-            "⚠️ The AI model name seems unsupported for your API key. "
-            "Set GEMINI_MODEL in .env to a valid model (e.g., gemini-2.5-flash)."
-        )
-        if target_msg:
-            await target_msg.reply_text(msg)
-        else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
     except RuntimeError as e:
         msg = str(e) or "No available Gemini model. Run /models and set GEMINI_MODEL in .env."
         if target_msg:
             await target_msg.reply_text(msg)
         else:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
-    except Exception:
-        logger.exception("AI Error (answers)")
-        if target_msg:
-            await target_msg.reply_text("⚠️ The AI is overloaded or the prompt was too long. Try again later.")
+    except Exception as e:
+        msg_text = str(e).lower()
+        if any(t in msg_text for t in ["not found", "404", "model", "unsupported"]):
+            logger.warning(f"Model issue (answers): {e}. Attempting fallback…")
+            if choose_model(None):
+                try:
+                    resp = genai_client.models.generate_content(model=current_model_name, contents=prompt)
+                    text = (getattr(resp, "text", None) or "(No response)").strip() or "(The AI returned an empty response.)"
+                    await reply_long(update, context, text)
+                    return
+                except Exception as inner:
+                    logger.error(f"Fallback answers model failed: {inner}")
+            human_msg = "⚠️ Gemini model unsupported. Run /models and set GEMINI_MODEL accordingly."
+            if target_msg:
+                await target_msg.reply_text(human_msg)
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=human_msg)
         else:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="⚠️ The AI is overloaded or the prompt was too long. Try again later.")
+            logger.exception("AI Error (answers)")
+            msg = "⚠️ The AI is overloaded or the prompt was too long. Try again later."
+            if target_msg:
+                await target_msg.reply_text(msg)
+            else:
+                await context.bot.send_message(chat_id=update.effective_chat.id, text=msg)
 
 
 # ----------------------
