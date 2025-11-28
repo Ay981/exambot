@@ -38,7 +38,8 @@ def _parse_int(env_val: Optional[str], default: int) -> int:
             return default
         return int(str(env_val).strip())
     except Exception:
-        logger.warning(f"Invalid PDF_MAX_PAGES value '{env_val}', falling back to {default}.")
+        # logger may not be initialized yet; use root logging
+        logging.warning(f"Invalid PDF_MAX_PAGES value '{env_val}', falling back to {default}.")
         return default
 
 PDF_MAX_PAGES = _parse_int(os.getenv("PDF_MAX_PAGES", None), 30)
