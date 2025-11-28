@@ -32,7 +32,16 @@ PAGES_JSON_TEMPLATE = os.path.join(DATA_DIR, "{chat_id}_pages.json")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-PDF_MAX_PAGES = int(os.getenv("PDF_MAX_PAGES", "30"))
+def _parse_int(env_val: Optional[str], default: int) -> int:
+    try:
+        if env_val is None:
+            return default
+        return int(str(env_val).strip())
+    except Exception:
+        logger.warning(f"Invalid PDF_MAX_PAGES value '{env_val}', falling back to {default}.")
+        return default
+
+PDF_MAX_PAGES = _parse_int(os.getenv("PDF_MAX_PAGES", None), 30)
 # Webhook config (for hosting on Cloud Run/Render/etc.)
 USE_WEBHOOK = os.getenv("USE_WEBHOOK", "false").lower() in {"1", "true", "yes"}
 HOST = os.getenv("HOST", "0.0.0.0")
